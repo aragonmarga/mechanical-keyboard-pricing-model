@@ -1,0 +1,339 @@
+---
+title: "Regression Analysis: Mechanical Keyboards"
+author: "Marga Aragon"
+format: pdf
+editor: visual
+---
+
+## Data Set: Mechanical Keyboards Web Scraped from MechanicalKeyboards.com
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(MASS)
+library(car)
+```
+
+```{r}
+df = read.csv("mkItems2.csv")
+head(df)
+glimpse(df)
+summary(df)
+```
+
+## Filling in Some `null` values
+
+```{r}
+ref_data = tibble::tribble(
+  ~name, ~price, ~weight, ~length, ~width, ~height,
+  "Keychron K12", 109.99, 2.27, 15.47, 5.55, 2.01,
+  "Keychron K8 Pro", 119.00, 3.39, 13.98, 4.84, 1.55,
+  "Logitech G512", 99.99, 2.49, 17.52, 5.35, 1.41,
+  "DURGOD K310", 99.00, 2.48, 17.2, 5.2, 1.0,
+  "CyberPowerPC CK60", 149.00, 2.8, 11.81, 4.33, 1.54,
+  "Kinesis mWave", 99.00, 2.0, 15.25, 9.5, 1.75,
+  "Logitech G Pro", 129.99, 2.16, 14.21, 6.02, 1.34,
+  "HyperX Alloy Origins 60", 59.99, 1.72, 11.5, 4.1, 1.5,
+  "Corsair K63", 79.99, 2.65, 14.37, 6.73, 1.25,
+  "Happy Hacking Keyboard", 275.00, 1.1, 11.6, 4.3, 1.2
+)
+```
+
+```{r}
+df = df %>%
+  mutate(
+    price = as.numeric(gsub("\\$", "", price)),
+    weight = as.numeric(gsub(" lbs", "", weight))
+  )
+
+df2 = df %>%
+  left_join(ref_data, by = "name", suffix = c("", "_ref")) %>%
+  mutate(
+    price = coalesce(price, price_ref),
+    weight = coalesce(weight, weight_ref),
+    length_in = coalesce(as.numeric(gsub("\".*", "", dimension)), length),
+    width_in = coalesce(as.numeric(sub(".*x\\s*([0-9.]+)\"\\s*x.*", 
+                                       "\\1", dimension)), width),
+    height_in = coalesce(as.numeric(sub(".*x.*x\\s*([0-9.]+)\"", 
+                                        "\\1", dimension)), height)
+  ) %>%
+  dplyr::select(-matches("_ref$"), -length, -width, -height)
+```
+
+## Data Cleaning
+
+```{r}
+df2 = df2 %>%
+  mutate(price = as.numeric(gsub("\\$", "", price)),
+         weight = as.numeric(gsub(" lbs", "", weight)),
+         # Extract dimensions (Length x Width x Height in inches)
+         length_in = as.numeric(sub("\".*", "", dimension)),
+         width_in = as.numeric(sub(".*x\\s*([0-9.]+)\"\\s*x.*", 
+                                   "\\1", dimension)),
+         height_in = as.numeric(sub(".*x.*x\\s*([0-9.]+)\"", 
+                                    "\\1", dimension)))
+```
+
+```{r}
+df2 = df2 %>% dplyr::select(-img, -sku, -model, -name, -dimension)
+```
+
+```{r}
+# Convert character columns to factors
+df2 = df2 %>%
+  mutate(across(where(is.character), as.factor))
+str(df2)
+```
+
+```{r}
+df2 = df2 %>% dplyr::select(-logilayout, - averating)
+```
+
+```{r}
+kb = df2 %>%
+  filter(weight > 0, width_in > 0, length_in > 0, nreviews > 0)
+
+kb$nreviews = kb$nreviews + 1
+```
+
+## EDA
+
+```{r, fig.width=10, fig.height=10}
+ggplot(kb, aes(x = brand, y = price)) +
+         geom_bar(stat = "identity",
+                  fill = "midnightblue") +
+         labs(title = "Price Distribution by Brand") +
+  coord_flip()
+       
+ggplot(kb, aes(x = brand, y = nreviews)) +
+         geom_bar(stat = "identity", 
+                  fill = "midnightblue") +
+         labs(title = "Number of Reviews by Brand") +
+  coord_flip()
+
+ggplot(df, aes(x = brand, y = averating)) +
+         geom_bar(stat = "identity",
+                  fill = "midnightblue") +
+         labs(title = "Average Rating by Brand") +
+  coord_flip()
+
+ggplot(kb, aes(x = physlayout)) +
+  geom_bar(fill = "midnightblue") +
+  labs(title = "Count Distribution by Physical Layout")
+```
+
+```{r}
+# Count physical layouts
+layout_counts = kb %>%
+  count(physlayout)
+
+# Create a vector of midnight blue shades
+my_color = c("darkred", "midnightblue")
+
+ggplot(layout_counts, aes(x = "", y = n, fill = physlayout)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  scale_fill_manual(values = my_color) +
+  labs(title = "Distribution by Physical Layout", fill = "Layout") +
+  theme_void()
+
+
+```
+
+## Correlation Matrix
+
+```{r, fig.width=10, fig.height=10}
+num_vars=kb %>% dplyr::select(where(is.numeric))
+
+library(corrplot)
+
+col_gradient = colorRampPalette(c("white", "midnightblue"))(200)
+
+cor_matrix = cor(num_vars, use = "complete.obs")
+
+corrplot(cor_matrix,
+         method = "color",
+         col = col_gradient,
+         addCoef.col = "black",  # coefficient text color
+         tl.col = "black",       # text label color
+         number.cex = 1)       # adjust as needed
+```
+
+## Model Selection
+
+```{r}
+kb = kb %>% dplyr::select(-keycap)
+```
+
+```{r}
+names(kb)
+```
+
+```{r}
+mod.full = lm(price ~ ., data = kb)
+mod.0 = lm(price ~ 1, data = kb)
+n = nrow(df2)
+
+back_aic = step(mod.full, direction= "backward", trace = 0)
+back_bic = step(mod.full, direction = "backward", 
+                scope = list(lower = mod.0, upper = mod.full), 
+                k = log(n), trace = 0)
+
+anova(back_bic, back_aic)
+```
+
+```{r}
+lm1 = lm(price ~ brand + frcolor + interface + led + rollover + size + 
+    switch + weight + length_in + width_in + height_in, data = kb)
+
+#Linearity
+plot(lm1$fitted.values, residuals(lm1),
+main = "Residuals vs Fitted",
+xlab = "Fitted Values", ylab = "Residuals")
+abline(h = 0, col = "midnightblue")
+
+#Q-Q Plot Normality
+qqnorm(residuals(lm1), main = "Q-Q Plot of Residuals")
+qqline(residuals(lm1), col = "magenta")
+```
+
+## Transformation
+
+```{r}
+pt = powerTransform(cbind(weight, height_in, width_in, length_in)
+                    ~ 1, data = kb)
+summary(pt)
+```
+
+```{r}
+summary(powerTransform(lm1))
+boxCox(lm1)
+```
+
+```{r}
+ final.lm = lm(sqrt(price) ~ brand + frcolor + interface + led + rollover + size +
+ switch + weight + length_in + width_in + height_in, data = kb)
+```
+
+## Outliers and Bad Leverages
+
+```{r}
+high_resid = which(abs(rstandard(final.lm)) > 3)
+kb[high_resid, ]
+```
+
+```{r}
+plot(hatvalues(final.lm), rstandard(final.lm), xlab = "Leverage",
+ylab = "Standardized Residuals")
+p = 11
+n = nrow(kb)
+abline(h = c(-3, 3), lty = 3, col = 'midnightblue')
+abline(v = 3 * (p + 1)/n, col = 'deeppink', lty = 3)
+```
+
+```{r}
+ind_h = which(hatvalues(final.lm) > 3 * (p + 1)/n) #hatvalues calculate leverages
+kb[ind_h, ]
+```
+
+```{r}
+bad_lv = which(hatvalues(final.lm) > 3 * (p+1)/n &
+abs(rstandard(final.lm)) > 3)
+kb[bad_lv,]
+nrow(kb)
+```
+
+## Removing Bad Leverages
+
+```{r}
+summary(kb$price)
+unique(kb$brand)
+summary(kb$height_in)
+summary(kb$width_in)
+summary(kb$length_in)
+```
+
+## Refitting and Checking Diagnostics One More Time
+
+```{r}
+final.lm2 = lm(sqrt(price) ~ brand + frcolor + interface + led + rollover + size + 
+    switch + I(sqrt(weight)) +
+             I(length_in^2) +
+             I(width_in^2) +
+             I(height_in^(-0.5)), data = kb)
+
+#Linearity
+plot(final.lm2$fitted.values, residuals(final.lm2),
+main = "Residuals vs Fitted",
+xlab = "Fitted Values", ylab = "Residuals")
+abline(h = 0, col = "midnightblue")
+
+#Q-Q Plot Normality
+qqnorm(residuals(final.lm2), main = "Q-Q Plot of Residuals")
+qqline(residuals(final.lm2), col = "magenta")
+```
+
+## Prediction
+
+```{r}
+new_keyboard = data.frame(
+  brand = "Ducky",
+  frcolor = "Black",
+  interface = "USB",
+  led = "RGB",
+  rollover = "Full",
+  size = "Full Size",
+  switch = "Cherry MX Red",
+  weight = 2.1,
+  length_in = 14.5,
+  width_in = 5.5,
+  height_in = 1.5
+)
+
+predicted_price1 = predict(final.lm2, newdata = new_keyboard)
+actual_price = predicted_price1^2
+cat("Predicted price: $", round(actual_price, 2))
+```
+
+```{r}
+pred_actual_scale= predict(final.lm2)^2
+plot(kb$price, pred_actual_scale,
+     xlab = "Actual Price", ylab = "Predicted Price",
+     main = "Actual vs Predicted")
+abline(0, 1, col = "navyblue", lwd = 2)
+
+```
+
+```{r}
+pred_actual_scale = predict(final.lm2)^2
+rmse = sqrt(mean((kb$price - pred_actual_scale)^2))
+rmse
+```
+
+```{r}
+summary(final.lm2)
+```
+
+## Implementing Trump Tariffs on China (145%) and Inflation (27.4%)
+
+```{r}
+sqrt_preds = predict(final.lm2, newdata = kb)
+price_preds = sqrt_preds^2  # actual predicted prices
+
+kb$price_with_tariff = price_preds * 2.45 * 1.274
+kb$tariff_impact = kb$price_with_tariff - price_preds
+```
+
+```{r}
+kb$price_with_tariff_sqrt = sqrt(kb$price_with_tariff)
+
+mod.sim = lm(sqrt(price_with_tariff) ~ brand + frcolor + interface + led + 
+    rollover + size + switch + weight + length_in + width_in + 
+    height_in, data = kb)
+
+predicted_price2 <- predict(mod.sim, newdata = new_keyboard)
+predicted_price_actual <- predicted_price2^2
+cat("Predicted price: $", round(predicted_price_actual, 2))
+```
